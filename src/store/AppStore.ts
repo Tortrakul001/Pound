@@ -44,12 +44,13 @@ interface AppState {
   addParkingSpot: (spotData: Omit<ParkingSpot, 'id' | 'ownerId' | 'rating' | 'reviewCount'>) => Promise<void>;
   updateParkingSpot: (id: string, updates: Partial<ParkingSpot>) => void;
   deleteParkingSpot: (id: string) => void;
-  createBooking: (bookingData: Omit<Booking, 'id' | 'qrCode' | 'pin' | 'createdAt'>) => Booking;
+  createBooking: (bookingData: Omit<Booking, 'id' | 'qrCode' | 'pin' | 'createdAt'>) => Promise<Booking>;
   validateEntry: (code: string) => Booking | null;
   
   // Search and filter actions
   setSearchQuery: (query: string) => void;
   setFilters: (filters: Partial<AppState['filters']>) => void;
+  applyFilters: () => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -108,6 +109,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           if (userData.role === 'CUSTOMER') {
             await get().fetchVehicles();
             await get().fetchBookings();
+          } else if (userData.role === 'OWNER' || userData.role === 'ADMIN') {
+            await get().fetchBookings();
           }
         }
       } else {
@@ -164,6 +167,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           await get().fetchParkingSpots();
           if (userData.role === 'CUSTOMER') {
             await get().fetchVehicles();
+            await get().fetchBookings();
+          } else if (userData.role === 'OWNER' || userData.role === 'ADMIN') {
             await get().fetchBookings();
           }
         }
@@ -237,21 +242,44 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   fetchBookings: async () => {
-    const { user } = get();
+    const { user, userType } = get();
     if (!user) return;
 
     try {
       set(state => ({ loading: { ...state.loading, bookings: true } }));
       
-      const { data, error } = await supabase
+      let query = supabase
         .from('bookings')
         .select(`
           *,
           parking_spots!inner(name, address),
           vehicles!inner(make, model, license_plate)
-        `)
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+        `);
+
+      // Filter based on user type
+      if (userType === 'CUSTOMER') {
+        query = query.eq('user_id', user.id);
+      } else if (userType === 'OWNER' || userType === 'ADMIN') {
+        // For owners, get bookings for their parking spots
+        const { data: ownerSpots } = await supabase
+          .from('parking_spots')
+          .select('id')
+          .eq('owner_id', user.id);
+        
+        if (ownerSpots && ownerSpots.length > 0) {
+          const spotIds = ownerSpots.map(spot => spot.id);
+          query = query.in('spot_id', spotIds);
+        } else {
+          // No spots owned, return empty array
+          set({ 
+            bookings: [],
+            loading: { ...get().loading, bookings: false }
+          });
+          return;
+        }
+      }
+
+      const { data, error } = await query.order('created_at', { ascending: false });
 
       if (error) throw error;
 
@@ -361,20 +389,58 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().applyFilters();
   },
 
-  createBooking: (bookingData) => {
-    const newBooking: Booking = {
-      ...bookingData,
-      id: `booking-${Date.now()}`,
-      qrCode: `QR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      pin: Math.floor(1000 + Math.random() * 9000).toString(),
-      createdAt: new Date().toISOString()
-    };
+  createBooking: async (bookingData) => {
+    const { user } = get();
+    if (!user) throw new Error('User not authenticated');
 
-    set(state => ({
-      bookings: [newBooking, ...state.bookings]
-    }));
+    try {
+      // Generate QR code and PIN
+      const qrCode = `QR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const pin = Math.floor(1000 + Math.random() * 9000).toString();
 
-    return newBooking;
+      const { data, error } = await supabase
+        .from('bookings')
+        .insert({
+          spot_id: bookingData.spotId,
+          user_id: user.id,
+          vehicle_id: bookingData.vehicleId,
+          start_time: bookingData.startTime,
+          end_time: bookingData.endTime,
+          reserved_end_time: bookingData.endTime,
+          total_cost: bookingData.totalCost,
+          status: 'PENDING',
+          qr_code: qrCode,
+          pin: pin
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      const newBooking: Booking = {
+        id: data.id,
+        spotId: data.spot_id,
+        userId: data.user_id,
+        vehicleId: data.vehicle_id,
+        startTime: data.start_time,
+        endTime: data.end_time,
+        totalCost: data.total_cost,
+        status: data.status.toLowerCase() as 'pending',
+        qrCode: data.qr_code,
+        pin: data.pin,
+        createdAt: data.created_at
+      };
+
+      // Update local state
+      set(state => ({
+        bookings: [newBooking, ...state.bookings]
+      }));
+
+      return newBooking;
+    } catch (error) {
+      console.error('Error creating booking:', error);
+      throw error;
+    }
   },
 
   validateEntry: (code) => {
