@@ -11,7 +11,7 @@ import { LoginPage } from './pages/LoginPage';
 import { AddParkingSpot } from './pages/AddParkingSpot';
 import { EditParkingSpot } from './pages/EditParkingSpot';
 import { ManageAvailability } from './pages/ManageAvailability';
-/* import { useAppStore } from './store/AppStore'; */
+import { useAppStore } from './store/AppStore';
 
 function App() {
   const { isAuthenticated, userType, initializeApp, loading } = useAppStore();
